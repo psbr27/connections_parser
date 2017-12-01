@@ -1,0 +1,142 @@
+#!/usr/bin/env python
+from multiprocessing import Process, Queue
+
+import mysql_queries as mysql
+import iptablelib
+import portmanagerlib
+import logmanager
+import sys
+import time
+
+iptables = iptablelib.IpTablesLib('100.61.0.1', '10.1.1.199')
+iptables.installIpTableNorth('10.1.1.77', 8000, 25000)
+portmanager = portmanagerlib.PortManager()
+log_m = logmanager.LogManager()
+log = log_m.logger()
+
+
+""" """
+def install_iptables(sessions):
+    for item in sessions:
+        session = sessions[item]
+        ssh_port = mysql.mysql_query_port_no(str(session['username']))
+        iptables.installIpTableSouth(str(session['local_ip']), 22, ssh_port)
+""" """
+def delete_iptables(sessions):
+    for item in sessions:
+        session = sessions[item]
+        ssh_port = mysql.mysql_query_reset_port_no(str(session['username']))
+        iptables.deleteIpTableSouth(str(session['local_ip']), 22, ssh_port)
+""" """
+def query_esc_tbl():
+    count = mysql.mysql_query_select_esc_tbl()
+    return count
+
+""" """
+# Delete MySql data tables before start of the application
+def cleanup_db():
+    log.debug("Delete esc_tbl and esc_hbeat_tbl from escdb database")
+    conn = mysql.connect()
+    cursor = conn.cursor()
+    sql = "DELETE FROM esc_tbl;"
+    cursor.execute(sql)
+    sql = "DELETE FROM esc_hbeat_tbl;"
+    cursor.execute(sql)
+    conn.commit()
+    conn.close()
+    cursor.close()
+
+
+""" """
+def parse_connections(q):
+    even_odd = 0
+    long(even_odd)
+    len_q = 0
+    log.debug("Inside parser connections function")
+    cleanup_db()
+    n_list=[]
+    n_1_list=[]
+    list_count = 0
+
+    while True:
+
+      sessions = q.get()
+      len_q = (len(sessions))
+#fetch the number of sessions
+#query the sql database
+      count = query_esc_tbl() 
+      if count is -1:
+          log.debug("Reset ssh ports to ZERO")
+          time.sleep(1)
+          mysql.mysql_update_ssh_ports(sessions)
+          log.debug("Insert data into esc_tbl")
+          time.sleep(1)
+          mysql.mysql_insert_query(sessions, True)
+          install_iptables(sessions)
+      else:
+#vouch for n, n-1 list
+          if even_odd % 2 == 0:
+            print("Even %d" %even_odd)
+            for item in sessions:
+              n_list.append(item)
+            print(n_list)  
+          else:
+            print("Odd %d" %even_odd)
+            for item in sessions:
+              n_1_list.append(item)
+            print(n_1_list)  
+
+          diff = list(set(n_list)-set(n_1_list))
+          print("connections of n & n-1 iterations %s" %diff)
+          list_count = len(diff)
+
+          if list_count == 0:
+            log.info("No new connections at this moment")
+            del n_list[:]
+            del n_1_list[:]
+
+          if list_count > 0:
+#check for new incoming session
+            count = mysql.mysql_query_select_esc_tbl()
+            if len_q > count:
+#query the sql to know new connection;if not found add it
+#fetch local_ip from new connection
+              for item in diff:
+                for session in sessions:
+                  if item in session:
+                    log.info("New incoming connection")
+                    mysql.mysql_new_insert_query(session)
+                    ssh_port = mysql.mysql_query_port_no(str(session['username']))
+                    iptables.installIpTableSouth(str(session['local_ip']), 22, ssh_port)
+                    break
+            elif len_q == count:
+                pass
+            else:
+#if connection is dropped
+              for item in diff:
+                log.warn("[%s] Connection dropped, reason [reboot or vpn down]" %(item))
+                ssh_port = mysql.mysql_query_reset_port_no(str(item))
+                local_ip = mysql.mysql_query_local_ip(str(item))
+                log.info("Clean up iptable for %s IP: %s and port: %d"
+%(str(item), str(local_ip), int(ssh_port)))
+                iptables.deleteIpTableSouth(local_ip, 22, ssh_port)
+              del n_list[:]
+              del n_1_list[:]
+
+          even_odd = even_odd + 1
+#update the stats of client connections
+      mysql.mysql_update_query(sessions,0)
+
+
+""" Process P2 """
+def ping_connections(q):
+    log.info("+++ Created ping handler thread +++")
+    while True:
+        esc_dict = mysql.mysql_query_select_esc_tbl_with_ping(q)
+        for key,item in esc_dict.items():
+          print(item,key)
+          mysql.mysql_query_update_like_esc_tbl(item,0,key)
+          #wait for another cycle before trigger ping
+          #time.sleep(5)
+
+
